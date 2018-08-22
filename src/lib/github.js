@@ -141,9 +141,6 @@ function searchFilesFromRepo (repo, searchPattern, accessToken) {
   };
   return fetchWithOctokit('search.code', params, accessToken)
     .then(result => result.items)
-    .then(items => Promise.all(
-      items.map(item => fetchFileFromRepo(repo, item.path, accessToken))
-    ));
 }
 
 function fetchFileFromRepo (repo, path, accessToken) {

@@ -4,11 +4,19 @@ import cache from '../cache';
 
 import xmldoc from 'xmldoc';
 
-import { searchFilesFromRepo } from '../github';
+import { searchFilesFromRepo, fetchFileFromRepo } from '../github';
 
-import { flatten } from 'lodash';
+import { flatten, pick } from 'lodash';
 
 const _debug = debug('dependencies:nuget');
+
+function parseXml (text) {
+  try {
+    return new xmldoc.XmlDocument(text);
+  } catch (e) {
+    console.error(e);
+  }
+}
 
 function csprojDependenciesStats (csproj) {
   const dependencies = {};
@@ -38,15 +46,38 @@ function getDependenciesFromGithubRepo (githubRepo, githubAccessToken) {
   }
 
   function mapPackages (searchPattern, transform) {
+    _debug('getDependenciesFromGithubRepo mapPackages', githubRepo.full_name, searchPattern);
     return searchFilesFromRepo(githubRepo, searchPattern, githubAccessToken)
-      .then(files => files.map(xml => new xmldoc.XmlDocument(xml))
-        .map(transform)
-      )
-      .then(deps => deps && deps.length ? deps.reduce(aggregateDependencies) : [])
-      .catch(err => {
-        _debug(`getDependenciesFromGithubRepo error: ${err.message}`);
-        return [];
-      });
+      // 1. pick the keys we want to work with
+      .then(files => files.map(file => pick(file, ['name', 'path'])))
+      // 2. filter GitHub results to be more restrictive (the query pattern doesn't let us to that before)
+      .then(files => files.filter(file => file.name.endsWith(searchPattern.replace('*', ''))))
+      // .. log what we have so far
+      .then(files => {
+        _debug(files);
+        return files;
+      })
+      // 3. fetch the files
+      .then(files => Promise.all(
+        files.map(async file => {
+          file.text = await fetchFileFromRepo(githubRepo, file.path, githubAccessToken);
+          return file;
+        })
+      ))
+      // 4. parse the files as XML
+      .then(files => files.map(file => {
+        file.xml = parseXml(file.text);
+        return file;
+      }))
+      // 5. filter invalid XMLs
+      .then(files => files.filter(file => !!file.xml))
+      // 6. parse the dependencies
+      .then(files => files.map(file => {
+        const deps = transform(file.xml);
+        return deps;
+      }))
+      // 7. aggregate the dependencies (is that equivalent to flatten?)
+      .then(deps => deps && deps.length ? deps.reduce(aggregateDependencies) : []);
   }
 
   // Modern C# projects define dependencies in the *.csproj files, however this is
@@ -63,17 +94,25 @@ function getDependenciesFromGithubRepo (githubRepo, githubAccessToken) {
     .then(result => {
       cache.set(cacheKey, result);
       return result;
+    })
+    .catch(err => {
+      _debug(`getDependenciesFromGithubRepo error: ${err.message}`);
+      return [];
     });
 }
 
 function dependenciesStats (file) {
   if (file.name === 'packages.config') {
-    const xml = new xmldoc.XmlDocument(file.text);
-    return packagesConfigDependenciesStats(xml);
+    const xml = parseXml(file.text);
+    if (xml) {
+      return packagesConfigDependenciesStats(xml);
+    }
   }
   if (file.name.indexOf('.csproj') !== -1) {
-    const xml = new xmldoc.XmlDocument(file.text);
-    return csprojDependenciesStats(xml);
+    const xml = parseXml(file.text);
+    if (xml) {
+      return csprojDependenciesStats(xml);
+    }
   }
   return [];
 }
